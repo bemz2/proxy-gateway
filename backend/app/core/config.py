@@ -32,6 +32,7 @@ class Settings(BaseSettings):
     smtp_sender: EmailStr = "noreply@example.com"
     use_console_email: bool = True
     ws_heartbeat_seconds: int = 10
+    vm_allocation_timeout_hours: int = 24
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
 
