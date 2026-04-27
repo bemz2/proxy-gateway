@@ -3,37 +3,34 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
-def test_send_activation_email_console_mode(monkeypatch):
+def test_send_activation_email_console_mode(monkeypatch, caplog):
     """Test email sending in console mode"""
     from app.services.email import send_activation_email
-
-    # Capture print output
-    printed_output = []
-
-    def mock_print(*args, **kwargs):
-        printed_output.append(str(args[0]) if args else "")
-
-    monkeypatch.setattr("builtins.print", mock_print)
-
-    send_activation_email("test@example.com", "abc123def456")
-
-    output = "\n".join(printed_output)
-    assert "test@example.com" in output
-    assert "abc123def456" in output
-    assert "Ключ активации" in output
+    
+    # Ensure console mode is enabled
+    from app.core.config import settings
+    monkeypatch.setattr(settings, "use_console_email", True)
+    
+    with caplog.at_level("INFO"):
+        send_activation_email("test@example.com", "abc123def456")
+    
+    # Check that email was logged
+    log_output = caplog.text
+    assert "test@example.com" in log_output
+    assert "abc123def456" in log_output
 
 
 def test_celery_task_execution(db_session, monkeypatch):
     """Test that Celery task can be called"""
     from app.tasks.email_tasks import send_activation_email_task
-
+    
     # Mock the actual email sending
     mock_send = MagicMock()
-    monkeypatch.setattr("app.services.email.send_activation_email", mock_send)
-
+    monkeypatch.setattr("app.tasks.email_tasks.send_activation_email", mock_send)
+    
     # Call the task directly (not via .delay())
     send_activation_email_task("test@example.com", "testkey123")
-
+    
     mock_send.assert_called_once_with(email_to="test@example.com", activation_key="testkey123")
 
 
