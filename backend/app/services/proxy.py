@@ -1,4 +1,6 @@
 import asyncio
+import contextlib
+import re
 import secrets
 from datetime import datetime, timezone
 
@@ -7,9 +9,12 @@ from sqlalchemy import Select, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.logging import get_logger
 from app.models.user import User
 from app.models.virtual_machine import VirtualMachine
 from app.schemas.proxy import ActivationResponse, AllocatedVm, ProxyStatusResponse
+
+logger = get_logger(__name__)
 
 
 class ConnectionManager:
@@ -68,13 +73,21 @@ class ConnectionManager:
         return token
 
 
-import contextlib
-
 connection_manager = ConnectionManager()
 
 
 def _as_utc(dt: datetime) -> datetime:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _normalize_activation_key(raw_key: str) -> str:
+    # Clipboard pastes can include spaces, line breaks, or zero-width characters.
+    collapsed = re.sub(r"[\s\u200b\u200c\u200d\ufeff]+", "", raw_key).lower()
+    if re.fullmatch(rf"[0-9a-f]{{{settings.activation_key_length}}}", collapsed):
+        return collapsed
+
+    match = re.search(rf"([0-9a-fA-F]{{{settings.activation_key_length}}})", raw_key)
+    return match.group(1).lower() if match else collapsed
 
 
 def _find_allocatable_vm() -> Select[tuple[VirtualMachine]]:
@@ -87,16 +100,27 @@ def _find_allocatable_vm() -> Select[tuple[VirtualMachine]]:
 
 
 def activate_key(db: Session, activation_key: str) -> ActivationResponse:
-    user = db.scalar(select(User).where(User.activation_key == activation_key))
+    normalized_key = _normalize_activation_key(activation_key)
+    logger.info(f"Activation attempt with key: {normalized_key[:8]}...")
+    
+    user = db.scalar(
+        select(User)
+        .where(User.activation_key == normalized_key)
+        .with_for_update()
+    )
     if not user:
+        logger.warning(f"Invalid activation key attempted: {normalized_key[:8]}...")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ключ активации недействителен")
     if not user.is_active:
+        logger.warning(f"Inactive user {user.id} attempted activation")
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Пользователь деактивирован")
     if user.activation_key_expires and _as_utc(user.activation_key_expires) < datetime.now(timezone.utc):
+        logger.warning(f"Expired key used by user {user.id}")
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Срок действия ключа истек")
 
     vm = db.scalar(_find_allocatable_vm())
     if not vm:
+        logger.warning(f"No free VMs available for user {user.id}")
         connection_manager.store_status(
             user_id=user.id,
             status_text="no_free_vms",
@@ -111,6 +135,9 @@ def activate_key(db: Session, activation_key: str) -> ActivationResponse:
     db.add_all([user, vm])
     db.commit()
     db.refresh(vm)
+    
+    logger.info(f"User {user.id} successfully allocated VM {vm.id} ({vm.name})")
+    
     ws_token = connection_manager.issue_ws_token(user.id)
     connection_manager.store_status(
         user_id=user.id,
@@ -131,8 +158,10 @@ def activate_key(db: Session, activation_key: str) -> ActivationResponse:
 def disconnect_proxy(db: Session, user_id: int) -> None:
     vm = db.scalar(select(VirtualMachine).where(VirtualMachine.current_user_id == user_id))
     if not vm:
+        logger.warning(f"User {user_id} attempted to disconnect but has no active proxy")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="У пользователя нет активного прокси")
 
+    logger.info(f"User {user_id} disconnecting from VM {vm.id} ({vm.name})")
     vm.current_user_id = None
     db.add(vm)
     db.commit()
