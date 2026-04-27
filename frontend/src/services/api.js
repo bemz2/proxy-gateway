@@ -2,6 +2,21 @@ import { clearAccessToken, getAccessToken } from '../stores/auth'
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api'
 
+const VALIDATION_FIELD_LABELS = {
+  email: 'Email',
+  password: 'Пароль',
+  password_confirmation: 'Подтверждение пароля',
+  current_password: 'Текущий пароль',
+  new_password: 'Новый пароль',
+  new_password_confirmation: 'Подтверждение нового пароля',
+}
+
+function formatValidationDetail(item) {
+  const field = item?.loc?.[item.loc.length - 1]
+  const label = VALIDATION_FIELD_LABELS[field] || field
+  return label ? `${label}: ${item.msg}` : item.msg
+}
+
 async function request(path, options = {}) {
   const headers = {
     'Content-Type': 'application/json',
@@ -22,12 +37,19 @@ async function request(path, options = {}) {
     clearAccessToken()
   }
 
+  let body = null
   const contentType = response.headers.get('content-type') || ''
-  const body = contentType.includes('application/json') ? await response.json() : null
+  const contentLength = response.headers.get('content-length')
+  const hasBody = response.status !== 204 && response.status !== 205 && contentLength !== '0'
+
+  if (hasBody && contentType.includes('application/json')) {
+    const responseText = await response.text()
+    body = responseText ? JSON.parse(responseText) : null
+  }
 
   if (!response.ok) {
     const detail = Array.isArray(body?.detail)
-      ? body.detail.map((item) => item.msg).join('. ')
+      ? body.detail.map(formatValidationDetail).join('. ')
       : body?.detail || 'Request failed'
     throw new Error(detail)
   }

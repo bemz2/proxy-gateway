@@ -35,8 +35,11 @@
             <v-btn color="primary" :loading="isRefreshingKey" @click="refreshKey">
               Обновить ключ
             </v-btn>
-            <v-btn variant="outlined" @click="loadProfile">
-              Обновить профиль
+            <v-btn variant="outlined" :loading="isLoadingProfile" @click="loadProfile">
+              <template #prepend>
+                <v-icon :class="{ 'spin-icon': isLoadingProfile }">mdi-refresh</v-icon>
+              </template>
+              Обновить
             </v-btn>
           </div>
         </div>
@@ -74,6 +77,7 @@ import { api } from '../services/api'
 import { clearAccessToken } from '../stores/auth'
 
 const router = useRouter()
+const isLoadingProfile = ref(false)
 const isRefreshingKey = ref(false)
 const isChangingPassword = ref(false)
 const profile = reactive({
@@ -96,6 +100,8 @@ function setMessage(type, text) {
 }
 
 async function loadProfile() {
+  isLoadingProfile.value = true
+
   try {
     const response = await api.getProfile()
     profile.email = response.email
@@ -103,6 +109,8 @@ async function loadProfile() {
   } catch (error) {
     clearAccessToken()
     router.push('/login')
+  } finally {
+    isLoadingProfile.value = false
   }
 }
 
@@ -124,8 +132,18 @@ async function refreshKey() {
 async function changePassword() {
   setMessage('success', '')
 
+  if (passwordForm.current_password.length < 8) {
+    setMessage('error', 'Текущий пароль должен быть не короче 8 символов')
+    return
+  }
+
   if (passwordForm.new_password.length < 8) {
     setMessage('error', 'Новый пароль должен быть не короче 8 символов')
+    return
+  }
+
+  if (passwordForm.new_password_confirmation.length < 8) {
+    setMessage('error', 'Подтверждение нового пароля должно быть не короче 8 символов')
     return
   }
 
