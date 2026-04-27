@@ -55,6 +55,27 @@ def test_activate_key_invalid(client):
     assert response.status_code == 404
 
 
+def test_activate_key_accepts_key_with_whitespace_and_zero_width_chars(client):
+    """Test activating key copied from UI with invisible formatting characters"""
+    activation_key, token = create_user_and_login(client)
+
+    client.post(
+        "/api/vms",
+        headers=auth_headers(token),
+        json={
+            "name": "proxy-1",
+            "host": "127.0.0.1",
+            "port": 1080,
+            "protocol": "socks5",
+            "is_active": True,
+        },
+    )
+
+    formatted_key = f"  {activation_key[:8]}\u200b{activation_key[8:16]}\n{activation_key[16:]}  "
+    response = client.post("/api/proxy/activate-key", json={"activation_key": formatted_key})
+    assert response.status_code == 200
+
+
 def test_activate_key_no_free_vm(client):
     """Test activating key when no VMs are available"""
     activation_key, _ = create_user_and_login(client)
