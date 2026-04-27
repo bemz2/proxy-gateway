@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -14,8 +14,10 @@ router = APIRouter()
 def get_virtual_machines(
     db: Session = Depends(get_db),
     _=Depends(get_current_user),
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=1000),
 ) -> list[VirtualMachineResponse]:
-    vms = list_virtual_machines(db=db)
+    vms = list_virtual_machines(db=db, skip=skip, limit=limit)
     return [VirtualMachineResponse.model_validate(vm) for vm in vms]
 
 

@@ -1,14 +1,20 @@
 from datetime import datetime
-from typing import Literal
+from enum import Enum
 
 from pydantic import BaseModel, Field
+
+
+class Protocol(str, Enum):
+    SOCKS5 = "socks5"
+    HTTP = "http"
+    HTTPS = "https"
 
 
 class VirtualMachineCreate(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     host: str = Field(min_length=1, max_length=255)
-    port: int = Field(gt=0, lt=65536)
-    protocol: Literal["socks5", "http", "https"]
+    port: int = Field(ge=1, le=65535)
+    protocol: Protocol
     is_active: bool = True
 
 

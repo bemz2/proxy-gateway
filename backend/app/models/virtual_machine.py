@@ -15,7 +15,7 @@ class VirtualMachine(Base):
     port: Mapped[int] = mapped_column(Integer, nullable=False)
     protocol: Mapped[str] = mapped_column(String(16), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    current_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    current_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
