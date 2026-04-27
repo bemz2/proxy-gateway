@@ -1,364 +1,230 @@
 import json
 import os
-import queue
+import re
+import sys
 import threading
-import tkinter as tk
-from tkinter import ttk
 from urllib.parse import urlencode
 
 import requests
 import websocket
+from PyQt6.QtCore import QObject, Qt, pyqtSignal
+from PyQt6.QtGui import QCloseEvent, QFont
+from PyQt6.QtWidgets import QApplication, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
 
 API_BASE_URL = os.getenv("PROXY_API_BASE_URL", "http://localhost:8000")
 
 
-class ProxyDesktopApp:
-    def __init__(self, root: tk.Tk) -> None:
-        self.root = root
-        self.root.title("Proxy Gateway Desktop")
-        self.root.configure(bg="#f3f3f3")
-        self.style = ttk.Style()
+def normalize_activation_key(raw_key: str) -> str:
+    collapsed = re.sub(r"[\s\u200b\u200c\u200d\ufeff]+", "", raw_key).lower()
+    match = re.search(r"([0-9a-f]{32})", collapsed)
+    return match.group(1) if match else collapsed
 
+
+class UiBridge(QObject):
+    status_changed = pyqtSignal(str, str)
+    message_changed = pyqtSignal(str, str)
+    vm_changed = pyqtSignal(dict, str)
+    connection_reset = pyqtSignal()
+    busy_changed = pyqtSignal(bool)
+    clear_key_requested = pyqtSignal()
+
+
+class ProxyDesktopApp(QWidget):
+    def __init__(self) -> None:
+        super().__init__()
         self.user_id: int | None = None
         self.ws_token: str | None = None
         self.ws: websocket.WebSocketApp | None = None
         self.ws_thread: threading.Thread | None = None
-        self.ui_queue: queue.Queue[tuple[str, str, str | None]] = queue.Queue()
 
-        self.activation_key_var = tk.StringVar()
-        self.status_var = tk.StringVar(value="ожидание")
-        self.status_message_var = tk.StringVar(value="Ключ еще не отправлен.")
-        self.host_var = tk.StringVar(value="-")
-        self.port_var = tk.StringVar(value="-")
-        self.protocol_var = tk.StringVar(value="-")
-        self.user_id_var = tk.StringVar(value="-")
-        self.message_var = tk.StringVar(value="")
-        self.activation_key_entry: tk.Entry | None = None
+        self.bridge = UiBridge()
+        self.bridge.status_changed.connect(self._handle_status_changed)
+        self.bridge.message_changed.connect(self._handle_message_changed)
+        self.bridge.vm_changed.connect(self._handle_vm_changed)
+        self.bridge.connection_reset.connect(self._reset_connection)
+        self.bridge.busy_changed.connect(self._set_busy)
+        self.bridge.clear_key_requested.connect(self.activation_key_entry_clear)
 
         self._build_ui()
-        self._bind_shortcuts()
-        self._fit_window_to_content()
-        self._poll_queue()
-        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self._reset_connection()
 
     def _build_ui(self) -> None:
-        self._configure_styles()
+        self.setWindowTitle("Proxy Gateway Desktop")
+        self.setMinimumWidth(520)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
-        container = tk.Frame(self.root, bg="#f3f3f3", padx=20, pady=20)
-        container.pack(fill=tk.BOTH, expand=True)
+        root_layout = QVBoxLayout(self)
+        root_layout.setContentsMargins(20, 20, 20, 20)
+        root_layout.setSpacing(0)
 
-        panel = tk.Frame(container, bg="#ffffff", bd=1, relief=tk.SOLID)
-        panel.pack(fill=tk.BOTH, expand=True)
+        panel = QFrame()
+        panel.setObjectName("panel")
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
+        panel_layout.setSpacing(0)
+        root_layout.addWidget(panel)
 
-        header = tk.Frame(panel, bg="#ffffff", padx=16, pady=16)
-        header.pack(fill=tk.X)
+        header = QWidget()
+        header_layout = QVBoxLayout(header)
+        header_layout.setContentsMargins(16, 16, 16, 16)
+        header_layout.setSpacing(0)
 
-        title = tk.Label(
-            header,
-            text="Подключение к прокси",
-            bg="#ffffff",
-            fg="#1f1f1f",
-            font=("Arial", 16, "bold"),
-        )
-        title.pack(anchor="w")
+        title = QLabel("Подключение к прокси")
+        title.setObjectName("title")
+        title_font = QFont()
+        title_font.setPointSize(16)
+        title_font.setBold(True)
+        title.setFont(title_font)
+        header_layout.addWidget(title)
+        panel_layout.addWidget(header)
 
-        divider = tk.Frame(panel, height=1, bg="#e5e5e5")
-        divider.pack(fill=tk.X)
+        divider = QFrame()
+        divider.setObjectName("divider")
+        divider.setFixedHeight(1)
+        panel_layout.addWidget(divider)
 
-        body = tk.Frame(panel, bg="#ffffff", padx=16, pady=16)
-        body.pack(fill=tk.BOTH, expand=True)
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(16, 16, 16, 16)
+        body_layout.setSpacing(16)
+        panel_layout.addWidget(body)
 
-        key_label = tk.Label(body, text="Ключ активации", bg="#ffffff", anchor="w")
-        key_label.pack(fill=tk.X)
+        key_label = QLabel("Ключ активации")
+        body_layout.addWidget(key_label)
 
-        key_entry = tk.Entry(
-            body,
-            textvariable=self.activation_key_var,
-            relief=tk.SOLID,
-            bd=1,
-            bg="#ffffff",
-            fg="#1f1f1f",
-            disabledbackground="#f2f2f2",
-            disabledforeground="#6a6a6a",
-            insertbackground="#1f1f1f",
-            selectbackground="#d9e7ff",
-            selectforeground="#1f1f1f",
-            highlightthickness=0,
-        )
-        key_entry.pack(fill=tk.X, pady=(8, 0), ipady=8)
-        key_entry.bind("<Return>", lambda _: self.connect())
-        key_entry.focus_set()
-        self.activation_key_entry = key_entry
+        self.activation_key_entry = QLineEdit()
+        self.activation_key_entry.setPlaceholderText("Вставьте ключ активации")
+        self.activation_key_entry.returnPressed.connect(self.connect_proxy)
+        body_layout.addWidget(self.activation_key_entry)
 
-        button_row = tk.Frame(body, bg="#ffffff")
-        button_row.pack(fill=tk.X, pady=(16, 0))
+        button_row = QHBoxLayout()
+        button_row.setSpacing(8)
+        body_layout.addLayout(button_row)
 
-        self.connect_button = ttk.Button(
-            button_row,
-            text="Подключиться",
-            style="Primary.TButton",
-            command=self.connect,
-        )
-        self.connect_button.pack(side=tk.LEFT)
+        self.connect_button = QPushButton("Подключиться")
+        self.connect_button.setObjectName("primaryButton")
+        self.connect_button.clicked.connect(self.connect_proxy)
+        button_row.addWidget(self.connect_button)
 
-        self.disconnect_button = ttk.Button(
-            button_row,
-            text="Отключиться",
-            style="Secondary.TButton",
-            state=tk.DISABLED,
-            command=self.disconnect,
-        )
-        self.disconnect_button.pack(side=tk.LEFT, padx=(8, 0))
+        self.disconnect_button = QPushButton("Отключиться")
+        self.disconnect_button.clicked.connect(self.disconnect_proxy)
+        button_row.addWidget(self.disconnect_button)
+        button_row.addStretch(1)
 
-        self.message_label = tk.Label(
-            body,
-            textvariable=self.message_var,
-            bg="#ffffff",
-            fg="#1f1f1f",
-            justify="left",
-            wraplength=440,
-        )
-        self.message_label.pack(fill=tk.X, pady=(16, 0))
+        self.message_label = QLabel("")
+        self.message_label.setWordWrap(True)
+        body_layout.addWidget(self.message_label)
 
-        status_frame = tk.Frame(body, bg="#ffffff", pady=16)
-        status_frame.pack(fill=tk.X)
+        self.status_value_label = QLabel("")
+        self.status_message_label = QLabel("")
+        self.status_message_label.setWordWrap(True)
+        self.host_value_label = QLabel("-")
+        self.port_value_label = QLabel("-")
+        self.protocol_value_label = QLabel("-")
+        self.user_id_value_label = QLabel("-")
 
-        self._add_row(status_frame, "Статус", self.status_var)
-        self._add_row(status_frame, "Сообщение", self.status_message_var)
+        status_grid = QGridLayout()
+        status_grid.setHorizontalSpacing(12)
+        status_grid.setVerticalSpacing(8)
+        status_grid.setContentsMargins(0, 0, 0, 0)
+        body_layout.addLayout(status_grid)
 
-        details_title = tk.Label(
-            body,
-            text="Данные подключения",
-            bg="#ffffff",
-            fg="#1f1f1f",
-            font=("Arial", 11, "bold"),
-        )
-        details_title.pack(anchor="w", pady=(8, 8))
+        self._add_row(status_grid, 0, "Статус", self.status_value_label)
+        self._add_row(status_grid, 1, "Сообщение", self.status_message_label)
 
-        details_frame = tk.Frame(body, bg="#ffffff")
-        details_frame.pack(fill=tk.X)
+        details_title = QLabel("Данные подключения")
+        details_title.setObjectName("sectionTitle")
+        details_font = QFont()
+        details_font.setPointSize(11)
+        details_font.setBold(True)
+        details_title.setFont(details_font)
+        body_layout.addWidget(details_title)
 
-        self._add_row(details_frame, "Host", self.host_var)
-        self._add_row(details_frame, "Port", self.port_var)
-        self._add_row(details_frame, "Protocol", self.protocol_var)
-        self._add_row(details_frame, "User ID", self.user_id_var)
+        details_grid = QGridLayout()
+        details_grid.setHorizontalSpacing(12)
+        details_grid.setVerticalSpacing(8)
+        details_grid.setContentsMargins(0, 0, 0, 0)
+        body_layout.addLayout(details_grid)
 
-    def _configure_styles(self) -> None:
-        try:
-            self.style.theme_use("clam")
-        except tk.TclError:
-            pass
+        self._add_row(details_grid, 0, "Host", self.host_value_label)
+        self._add_row(details_grid, 1, "Port", self.port_value_label)
+        self._add_row(details_grid, 2, "Protocol", self.protocol_value_label)
+        self._add_row(details_grid, 3, "User ID", self.user_id_value_label)
 
-        self.style.configure(
-            "Primary.TButton",
-            font=("Arial", 11),
-            padding=(14, 8),
-        )
-        self.style.map(
-            "Primary.TButton",
-            foreground=[
-                ("disabled", "#8b8b8b"),
-                ("!disabled", "#ffffff"),
-            ],
-            background=[
-                ("disabled", "#d6d6d6"),
-                ("pressed", "#2b2b2b"),
-                ("active", "#2b2b2b"),
-                ("!disabled", "#1f1f1f"),
-            ],
-            bordercolor=[
-                ("disabled", "#d6d6d6"),
-                ("!disabled", "#1f1f1f"),
-            ],
-            lightcolor=[
-                ("disabled", "#d6d6d6"),
-                ("!disabled", "#1f1f1f"),
-            ],
-            darkcolor=[
-                ("disabled", "#d6d6d6"),
-                ("!disabled", "#1f1f1f"),
-            ],
-        )
-
-        self.style.configure(
-            "Secondary.TButton",
-            font=("Arial", 11),
-            padding=(14, 8),
-        )
-        self.style.map(
-            "Secondary.TButton",
-            foreground=[
-                ("disabled", "#8b8b8b"),
-                ("!disabled", "#1f1f1f"),
-            ],
-            background=[
-                ("disabled", "#ececec"),
-                ("pressed", "#e5e5e5"),
-                ("active", "#e5e5e5"),
-                ("!disabled", "#ffffff"),
-            ],
-            bordercolor=[
-                ("disabled", "#d6d6d6"),
-                ("!disabled", "#bfbfbf"),
-            ],
-            lightcolor=[
-                ("disabled", "#ececec"),
-                ("!disabled", "#ffffff"),
-            ],
-            darkcolor=[
-                ("disabled", "#ececec"),
-                ("!disabled", "#ffffff"),
-            ],
+        self.setStyleSheet(
+            """
+            QWidget {
+                background: #f3f3f3;
+                color: #1f1f1f;
+                font-size: 13px;
+            }
+            QFrame#panel {
+                background: #ffffff;
+                border: 1px solid #d7d7d7;
+            }
+            QLabel#title {
+                background: #ffffff;
+                color: #1f1f1f;
+            }
+            QLabel#sectionTitle {
+                color: #1f1f1f;
+            }
+            QFrame#divider {
+                background: #e5e5e5;
+                border: none;
+            }
+            QLineEdit {
+                background: #ffffff;
+                border: 1px solid #cfcfcf;
+                border-radius: 6px;
+                padding: 10px 12px;
+                selection-background-color: #d9e7ff;
+            }
+            QLineEdit:disabled {
+                background: #f2f2f2;
+                color: #6a6a6a;
+            }
+            QPushButton {
+                border: 1px solid #bfbfbf;
+                border-radius: 6px;
+                padding: 8px 14px;
+                background: #ffffff;
+            }
+            QPushButton#primaryButton {
+                background: #1f1f1f;
+                color: #ffffff;
+                border-color: #1f1f1f;
+            }
+            QPushButton:disabled {
+                color: #8b8b8b;
+                background: #ececec;
+                border-color: #d6d6d6;
+            }
+            """
         )
 
-    def _bind_shortcuts(self) -> None:
-        for sequence in (
-            "<Control-v>",
-            "<Control-V>",
-            "<Control-KeyPress-v>",
-            "<Control-KeyPress-V>",
-            "<Command-v>",
-            "<Command-V>",
-            "<Command-KeyPress-v>",
-            "<Command-KeyPress-V>",
-            "<Shift-Insert>",
-        ):
-            self.root.bind_all(sequence, self._paste_into_focused_widget, add="+")
+        self.activation_key_entry.setFocus()
 
-        for sequence in (
-            "<Control-c>",
-            "<Control-C>",
-            "<Control-KeyPress-c>",
-            "<Control-KeyPress-C>",
-            "<Command-c>",
-            "<Command-C>",
-            "<Command-KeyPress-c>",
-            "<Command-KeyPress-C>",
-        ):
-            self.root.bind_all(sequence, self._copy_from_focused_widget, add="+")
-
-        for sequence in (
-            "<Control-x>",
-            "<Control-X>",
-            "<Control-KeyPress-x>",
-            "<Control-KeyPress-X>",
-            "<Command-x>",
-            "<Command-X>",
-            "<Command-KeyPress-x>",
-            "<Command-KeyPress-X>",
-        ):
-            self.root.bind_all(sequence, self._cut_from_focused_widget, add="+")
-
-    def _fit_window_to_content(self) -> None:
-        self.root.update_idletasks()
-        width = max(self.root.winfo_reqwidth(), 500)
-        height = self.root.winfo_reqheight()
-        self.root.geometry(f"{width}x{height}")
-        self.root.minsize(width, height)
-        self.root.resizable(False, False)
-
-    def _focused_text_widget(self) -> tk.Widget | None:
-        widget = self.root.focus_get()
-        return widget if isinstance(widget, (tk.Entry, ttk.Entry, tk.Text)) else None
-
-    def _paste_into_focused_widget(self, _event=None) -> str | None:
-        widget = self._focused_text_widget()
-        if widget is None:
-            return None
-        try:
-            widget.event_generate("<<Paste>>")
-            return "break"
-        except tk.TclError:
-            pass
-
-        try:
-            clipboard_text = self.root.clipboard_get()
-        except tk.TclError:
-            return "break"
-
-        if isinstance(widget, (tk.Entry, ttk.Entry)):
-            try:
-                selection_start = widget.index("sel.first")
-                selection_end = widget.index("sel.last")
-                widget.delete(selection_start, selection_end)
-                insert_at = selection_start
-            except tk.TclError:
-                insert_at = widget.index(tk.INSERT)
-            widget.insert(insert_at, clipboard_text)
-        elif isinstance(widget, tk.Text):
-            try:
-                widget.delete("sel.first", "sel.last")
-            except tk.TclError:
-                pass
-            widget.insert(tk.INSERT, clipboard_text)
-        return "break"
-
-    def _copy_from_focused_widget(self, _event=None) -> str | None:
-        widget = self._focused_text_widget()
-        if widget is None:
-            return None
-        widget.event_generate("<<Copy>>")
-        return "break"
-
-    def _cut_from_focused_widget(self, _event=None) -> str | None:
-        widget = self._focused_text_widget()
-        if widget is None:
-            return None
-        widget.event_generate("<<Cut>>")
-        return "break"
-
-    def _add_row(self, parent: tk.Widget, label_text: str, value_var: tk.StringVar) -> None:
-        row = tk.Frame(parent, bg="#ffffff")
-        row.pack(fill=tk.X, pady=4)
-
-        label = tk.Label(row, text=label_text, bg="#ffffff", fg="#5f5f5f", anchor="w")
-        label.pack(side=tk.LEFT)
-
-        value = tk.Label(row, textvariable=value_var, bg="#ffffff", fg="#1f1f1f", anchor="e")
-        value.pack(side=tk.RIGHT)
-
-    def _poll_queue(self) -> None:
-        while not self.ui_queue.empty():
-            action, value, extra = self.ui_queue.get()
-            if action == "status":
-                self.status_var.set(value)
-                if extra is not None:
-                    self.status_message_var.set(extra)
-            elif action == "message":
-                self._set_message(value, extra or "info")
-            elif action == "vm":
-                vm = json.loads(value)
-                self.host_var.set(vm.get("host", "-"))
-                self.port_var.set(str(vm.get("port", "-")))
-                self.protocol_var.set(vm.get("protocol", "-"))
-                self.user_id_var.set(extra or "-")
-            elif action == "ws_closed":
-                self.status_var.set("disconnected")
-                self.status_message_var.set("Соединение WebSocket закрыто.")
-            elif action == "ws_error":
-                self._set_message(value, "error")
-        self.root.after(150, self._poll_queue)
-
-    def _set_message(self, text: str, level: str) -> None:
-        self.message_var.set(text)
-        color = "#1f1f1f"
-        if level == "error":
-            color = "#7c1f1a"
-        elif level == "success":
-            color = "#1b5e20"
-        self.message_label.configure(fg=color)
+    def _add_row(self, layout: QGridLayout, row: int, label_text: str, value_label: QLabel) -> None:
+        label = QLabel(label_text)
+        label.setStyleSheet("color: #5f5f5f;")
+        value_label.setWordWrap(True)
+        value_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(label, row, 0)
+        layout.addWidget(value_label, row, 1)
 
     def _set_busy(self, is_busy: bool) -> None:
-        self.connect_button.configure(state=tk.DISABLED if is_busy else tk.NORMAL)
-        can_disconnect = tk.NORMAL if (not is_busy and self.user_id is not None) else tk.DISABLED
-        self.disconnect_button.configure(state=can_disconnect)
+        is_connected = self.user_id is not None
+        self.connect_button.setDisabled(is_busy or is_connected)
+        self.disconnect_button.setDisabled(is_busy or not is_connected)
+        self.activation_key_entry.setDisabled(is_connected)
 
     def _clear_vm(self) -> None:
-        self.host_var.set("-")
-        self.port_var.set("-")
-        self.protocol_var.set("-")
-        self.user_id_var.set("-")
+        self.host_value_label.setText("-")
+        self.port_value_label.setText("-")
+        self.protocol_value_label.setText("-")
+        self.user_id_value_label.setText("-")
 
     def _reset_connection(self) -> None:
         if self.ws:
@@ -370,20 +236,40 @@ class ProxyDesktopApp:
         self.user_id = None
         self.ws_token = None
         self._clear_vm()
-        self.status_var.set("ожидание")
-        self.status_message_var.set("Ключ еще не отправлен.")
+        self._handle_status_changed("ожидание", "Ключ еще не отправлен.")
         self._set_busy(False)
 
-    def connect(self) -> None:
-        activation_key = self.activation_key_var.get().strip()
+    def _handle_status_changed(self, status_text: str, message: str) -> None:
+        self.status_value_label.setText(status_text)
+        self.status_message_label.setText(message)
+
+    def _handle_message_changed(self, text: str, level: str) -> None:
+        color = "#1f1f1f"
+        if level == "error":
+            color = "#7c1f1a"
+        elif level == "success":
+            color = "#1b5e20"
+        self.message_label.setStyleSheet(f"color: {color};")
+        self.message_label.setText(text)
+
+    def _handle_vm_changed(self, vm: dict, user_id: str) -> None:
+        self.host_value_label.setText(str(vm.get("host", "-")))
+        self.port_value_label.setText(str(vm.get("port", "-")))
+        self.protocol_value_label.setText(str(vm.get("protocol", "-")))
+        self.user_id_value_label.setText(user_id or "-")
+
+    def activation_key_entry_clear(self) -> None:
+        self.activation_key_entry.clear()
+
+    def connect_proxy(self) -> None:
+        activation_key = normalize_activation_key(self.activation_key_entry.text())
         if not activation_key:
-            self._set_message("Введите ключ активации.", "error")
+            self._handle_message_changed("Введите ключ активации.", "error")
             return
 
         self._set_busy(True)
-        self._set_message("", "info")
-        self.status_var.set("ожидание")
-        self.status_message_var.set("Отправка ключа на backend.")
+        self._handle_message_changed("", "info")
+        self._handle_status_changed("ожидание", "Отправка ключа на backend.")
 
         thread = threading.Thread(target=self._connect_worker, args=(activation_key,), daemon=True)
         thread.start()
@@ -401,17 +287,19 @@ class ProxyDesktopApp:
 
             self.user_id = data["user_id"]
             self.ws_token = data["ws_token"]
-            vm = data["vm"]
-
-            self.ui_queue.put(("vm", json.dumps(vm), str(self.user_id)))
-            self.ui_queue.put(("status", data.get("status", "connected"), data.get("message", "Подключено.")))
-            self.ui_queue.put(("message", "Ключ активирован. Подключение установлено.", "success"))
-            self.root.after(0, lambda: self._set_busy(False))
+            self.bridge.vm_changed.emit(data["vm"], str(self.user_id))
+            self.bridge.status_changed.emit(
+                data.get("status", "connected"),
+                data.get("message", "Подключено."),
+            )
+            self.bridge.message_changed.emit("Ключ активирован. Подключение установлено.", "success")
+            self.bridge.busy_changed.emit(False)
+            self.bridge.clear_key_requested.emit()
             self._open_websocket()
         except Exception as exc:
-            self.ui_queue.put(("message", str(exc), "error"))
-            self.ui_queue.put(("status", "error", str(exc)))
-            self.root.after(0, self._reset_connection)
+            self.bridge.message_changed.emit(str(exc), "error")
+            self.bridge.status_changed.emit("error", str(exc))
+            self.bridge.connection_reset.emit()
 
     def _open_websocket(self) -> None:
         if self.user_id is None or self.ws_token is None:
@@ -428,15 +316,21 @@ class ProxyDesktopApp:
         def on_message(_, message: str) -> None:
             try:
                 payload = json.loads(message)
-                self.ui_queue.put(("status", payload.get("status", "ожидание"), payload.get("message", "")))
+                self.bridge.status_changed.emit(
+                    payload.get("status", "ожидание"),
+                    payload.get("message", ""),
+                )
             except json.JSONDecodeError:
-                self.ui_queue.put(("message", "Не удалось разобрать сообщение статуса.", "error"))
+                self.bridge.message_changed.emit(
+                    "Не удалось разобрать сообщение статуса.",
+                    "error",
+                )
 
         def on_error(_, error) -> None:
-            self.ui_queue.put(("ws_error", f"Ошибка WebSocket: {error}", None))
+            self.bridge.message_changed.emit(f"Ошибка WebSocket: {error}", "error")
 
         def on_close(*_) -> None:
-            self.ui_queue.put(("ws_closed", "", None))
+            self.bridge.status_changed.emit("disconnected", "Соединение WebSocket закрыто.")
 
         self.ws = websocket.WebSocketApp(
             ws_url,
@@ -448,7 +342,7 @@ class ProxyDesktopApp:
         self.ws_thread = threading.Thread(target=self.ws.run_forever, daemon=True)
         self.ws_thread.start()
 
-    def disconnect(self) -> None:
+    def disconnect_proxy(self) -> None:
         if self.user_id is None:
             return
 
@@ -467,14 +361,14 @@ class ProxyDesktopApp:
             if not response.ok:
                 raise RuntimeError(data.get("detail") or "Не удалось отключиться.")
 
-            self.ui_queue.put(("message", "Подключение закрыто.", "success"))
-            self.root.after(0, self._reset_connection)
-            self.ui_queue.put(("status", "disconnected", "Прокси освобожден."))
+            self.bridge.message_changed.emit("Подключение закрыто.", "success")
+            self.bridge.connection_reset.emit()
+            self.bridge.status_changed.emit("disconnected", "Прокси освобожден.")
         except Exception as exc:
-            self.ui_queue.put(("message", str(exc), "error"))
-            self.root.after(0, lambda: self._set_busy(False))
+            self.bridge.message_changed.emit(str(exc), "error")
+            self.bridge.busy_changed.emit(False)
 
-    def on_close(self) -> None:
+    def closeEvent(self, event: QCloseEvent) -> None:
         if self.user_id is not None:
             try:
                 requests.post(
@@ -489,18 +383,14 @@ class ProxyDesktopApp:
                 self.ws.close()
             except Exception:
                 pass
-        self.root.destroy()
+        super().closeEvent(event)
 
 
 def main() -> None:
-    root = tk.Tk()
-    style = ttk.Style()
-    try:
-        style.theme_use("clam")
-    except tk.TclError:
-        pass
-    ProxyDesktopApp(root)
-    root.mainloop()
+    app = QApplication(sys.argv)
+    window = ProxyDesktopApp()
+    window.show()
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":
