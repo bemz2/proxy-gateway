@@ -156,7 +156,7 @@ def activate_key(db: Session, activation_key: str) -> ActivationResponse:
 
 
 def disconnect_proxy(db: Session, user_id: int) -> None:
-    vm = db.scalar(select(VirtualMachine).where(VirtualMachine.current_user_id == user_id))
+    vm = db.scalar(select(VirtualMachine).where(VirtualMachine.current_user_id == user_id).with_for_update())
     if not vm:
         logger.warning(f"User {user_id} attempted to disconnect but has no active proxy")
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="У пользователя нет активного прокси")

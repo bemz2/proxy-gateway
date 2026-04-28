@@ -63,6 +63,7 @@ def cleanup_stale_vm_allocations(timeout_hours: int | None = None) -> dict[str, 
                 VirtualMachine.current_user_id.isnot(None),
                 VirtualMachine.last_used_at < stale_threshold,
             )
+            .with_for_update()
         ).all()
 
         count = 0
