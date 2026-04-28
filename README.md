@@ -359,8 +359,11 @@ proxy-gateway/
 # Запустить зависимости
 docker-compose up -d postgres redis
 
-# Войти в контейнер backend
-docker-compose exec backend bash
+#Перейти в бекенд
+cd backend
+
+#Установить зависимости
+pip install -r requirements.txt
 
 # Запустить все тесты
 pytest
