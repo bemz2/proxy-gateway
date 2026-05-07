@@ -276,7 +276,8 @@ POST /api/vms
 
 ```
 proxy-gateway/
-├── backend/                    # Backend приложение
+├── assets/                    # Примеры работы сервиса
+├── backend/                   # Backend приложение
 │   ├── alembic/               # Миграции БД
 │   │   └── versions/          # Файлы миграций
 │   ├── app/
